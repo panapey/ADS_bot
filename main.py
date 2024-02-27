@@ -35,6 +35,7 @@ cursor.execute('''
     subject VARCHAR(255),
     text TEXT,
     status VARCHAR(255),
+    comment TEXT,
     message_id INT
 );
 ''')
@@ -52,7 +53,8 @@ buttons = ["Создать заявку", "Проверить статус", "П
 keyboard.add(*buttons)
 
 admin_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-buttons = ["Просмотреть все заявки", "Просмотреть выполненные", "Просмотреть в процессе", "Изменить статус заявки"]
+buttons = ["Просмотреть новые заявки", "Просмотреть выполненные", "Просмотреть в процессе", "Обжалованные",
+           "Изменить статус заявки"]
 admin_keyboard.add(*buttons)
 
 superadmin_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -97,6 +99,10 @@ class RequestStatus(StatesGroup):
 class RequestForm(StatesGroup):
     subject = State()
     text = State()
+
+
+class AppealForm(StatesGroup):
+    comment = State()
 
 
 class IsSuperAdminFilter(aiogram.dispatcher.filters.BoundFilter):
@@ -471,7 +477,7 @@ async def admin_start(message: types.Message):
     await message.answer("Добро пожаловать, главный администратор!", reply_markup=superadmin_keyboard)
 
 
-@dp.message_handler(lambda message: message.text == 'Просмотреть все заявки', is_admin=True)
+@dp.message_handler(lambda message: message.text == 'Просмотреть новые заявки', is_admin=True)
 async def view_all_requests(message: types.Message):
     user_id = message.from_user.id
 
@@ -479,7 +485,7 @@ async def view_all_requests(message: types.Message):
     user = cursor.fetchone()
 
     if user:
-        cursor.execute('SELECT * FROM requests')
+        cursor.execute('SELECT * FROM requests WHERE status = ?', ('Зарегистрирована',))
         requests = cursor.fetchall()
 
         for request in requests:
@@ -534,6 +540,28 @@ async def view_in_progress_requests(message: types.Message):
         await message.answer("Вы не являетесь администратором!")
 
 
+@dp.message_handler(lambda message: message.text == 'Обжалованные', is_admin=True)
+async def view_in_progress_requests(message: types.Message):
+    user_id = message.from_user.id
+
+    cursor.execute('SELECT * FROM users WHERE id=?', (user_id,))
+    user = cursor.fetchone()
+
+    if user:
+        cursor.execute('SELECT * FROM requests WHERE status = ?', ('Обжалована',))
+        requests = cursor.fetchall()
+        print(requests)
+        for request in requests:
+            cursor.execute('SELECT * FROM users WHERE id = ?', (request[1],))
+            user = cursor.fetchone()
+            await bot.send_message(message.from_user.id,
+                                   f"Заявка {request[0]}:\nСоздатель: {user[5]}\nОрганизация: {user[4]}\n"
+                                   f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[4]}"
+                                   f"\nКомментарий: {request[5]}")
+    else:
+        await message.answer("Вы не являетесь администратором!")
+
+
 @dp.message_handler(lambda message: message.text == 'Изменить статус заявки', is_admin=True)
 async def change_request_status(message: types.Message):
     user_id = message.from_user.id
@@ -560,13 +588,13 @@ async def change_request_status(message: types.Message):
 @dp.callback_query_handler(lambda c: c.data.startswith('accept_'), state='*')
 async def process_callback_accept(callback_query: types.CallbackQuery, state: FSMContext):
     request_id = callback_query.data.split('_')[1]
-
+    print(request_id)
     cursor.execute('UPDATE requests SET status = ? WHERE id = ?', ('Принята в работу', request_id))
     conn.commit()
 
     cursor.execute('SELECT * FROM requests WHERE id = ?', (request_id,))
     request = cursor.fetchone()
-
+    print(request)
     cursor.execute('SELECT * FROM users WHERE id = ?', (request[1],))
     user = cursor.fetchone()
 
@@ -574,6 +602,31 @@ async def process_callback_accept(callback_query: types.CallbackQuery, state: FS
 
     await bot.answer_callback_query(callback_query.id)
     await bot.send_message(callback_query.from_user.id, f"Статус заявки {request_id} обновлен до 'Принята в работу'")
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('appeal_'), state='*')
+async def process_callback_appeal(callback_query: types.CallbackQuery, state: FSMContext):
+    request_id = callback_query.data.split('_')[1]
+    async with state.proxy() as data:
+        data['request_id'] = request_id
+        data['callback_query'] = callback_query
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id,
+                           f"Вы обжаловали выполнение заявки {request_id}. Пожалуйста, напишите комментарий.")
+    await AppealForm.comment.set()
+
+
+@dp.message_handler(state=AppealForm.comment)
+async def process_comment(message: types.Message, state: FSMContext):
+    comment = message.text
+    async with state.proxy() as data:
+        request_id = data['request_id']
+        callback_query = data['callback_query']
+    cursor.execute('UPDATE requests SET status = ?, comment = ? WHERE id = ?', ('Обжалована', comment, request_id))
+    conn.commit()
+    await message.answer("Ваш комментарий был добавлен к обжалованию заявки. Статус заявки обновлен до 'Обжалована'.")
+    await bot.send_message(callback_query.from_user.id, f"Комментарий к обжалованию заявки {request_id}: {comment}")
+    await state.finish()
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith('done_'), state='*')
@@ -588,7 +641,7 @@ async def process_callback_done(callback_query: types.CallbackQuery, state: FSMC
 
     cursor.execute('SELECT * FROM users WHERE id = ?', (request[1],))
     user = cursor.fetchone()
-
+    print(request[1])
     keyboard = InlineKeyboardMarkup()
     keyboard.add(InlineKeyboardButton("Принять выполнение", callback_data=f"accept_done_{request_id}"))
     keyboard.add(InlineKeyboardButton("Обжаловать", callback_data=f"appeal_{request_id}"))
@@ -603,20 +656,33 @@ async def process_callback_done(callback_query: types.CallbackQuery, state: FSMC
 @dp.callback_query_handler(lambda c: c.data.startswith('accept_done_'), state='*')
 async def process_callback_accept_done(callback_query: types.CallbackQuery, state: FSMContext):
     request_id = callback_query.data.split('_')[1]
-    await bot.answer_callback_query(callback_query.id)
-    await bot.send_message(callback_query.from_user.id, f"Вы приняли выполнение заявки {request_id}.")
+    cursor.execute('SELECT * FROM requests WHERE id = ?', (request_id,))
+    request = cursor.fetchone()
+    if request is not None:
+        user_id = request[1]
+        cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+        user = cursor.fetchone()
+        if user is not None:
+            cursor.execute('UPDATE requests SET status = ? WHERE id = ?', ('Выполнена', request_id))
+            conn.commit()
+            await bot.answer_callback_query(callback_query.id)
+            await bot.send_message(callback_query.from_user.id, f"Вы приняли выполнение заявки {request_id}.")
+        else:
+            await bot.send_message(callback_query.from_user.id, "Пользователь не найден.")
+    else:
+        await bot.send_message(callback_query.from_user.id, "Заявка не найдена.")
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith('appeal_'), state='*')
 async def process_callback_appeal(callback_query: types.CallbackQuery, state: FSMContext):
     request_id = callback_query.data.split('_')[1]
 
-    cursor.execute('UPDATE requests SET status = ? WHERE id = ?', ('Принята в работу', request_id))
+    cursor.execute('UPDATE requests SET status = ? WHERE id = ?', ('Обжалована', request_id))
     conn.commit()
 
     await bot.answer_callback_query(callback_query.id)
     await bot.send_message(callback_query.from_user.id,
-                           f"Вы обжаловали выполнение заявки {request_id}. Статус заявки обновлен до 'Принята в работу'.")
+                           f"Вы обжаловали выполнение заявки {request_id}. Статус заявки обновлен до 'Обжалована'.")
 
 
 @dp.message_handler(lambda message: message.text == 'Регистрация админов', is_superadmin=True)
