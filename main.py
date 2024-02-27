@@ -56,7 +56,7 @@ buttons = ["Просмотреть все заявки", "Просмотреть
 admin_keyboard.add(*buttons)
 
 superadmin_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-buttons = ["Регистрация админов"]
+buttons = ["Регистрация админов", "Разжалование админов"]
 superadmin_keyboard.add(*buttons)
 
 inline_kb_full = InlineKeyboardMarkup(row_width=2)
@@ -589,10 +589,34 @@ async def process_callback_done(callback_query: types.CallbackQuery, state: FSMC
     cursor.execute('SELECT * FROM users WHERE id = ?', (request[1],))
     user = cursor.fetchone()
 
-    await bot.send_message(user[0], f"Статус вашей заявки {request_id} обновлен до 'Выполнена'")
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton("Принять выполнение", callback_data=f"accept_done_{request_id}"))
+    keyboard.add(InlineKeyboardButton("Обжаловать", callback_data=f"appeal_{request_id}"))
+
+    await bot.send_message(user[0], f"Статус вашей заявки {request_id} обновлен до 'Выполнена'. Вы согласны с этим?",
+                           reply_markup=keyboard)
 
     await bot.answer_callback_query(callback_query.id)
     await bot.send_message(callback_query.from_user.id, f"Статус заявки {request_id} обновлен до 'Выполнена'")
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('accept_done_'), state='*')
+async def process_callback_accept_done(callback_query: types.CallbackQuery, state: FSMContext):
+    request_id = callback_query.data.split('_')[1]
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id, f"Вы приняли выполнение заявки {request_id}.")
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('appeal_'), state='*')
+async def process_callback_appeal(callback_query: types.CallbackQuery, state: FSMContext):
+    request_id = callback_query.data.split('_')[1]
+
+    cursor.execute('UPDATE requests SET status = ? WHERE id = ?', ('Принята в работу', request_id))
+    conn.commit()
+
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id,
+                           f"Вы обжаловали выполнение заявки {request_id}. Статус заявки обновлен до 'Принята в работу'.")
 
 
 @dp.message_handler(lambda message: message.text == 'Регистрация админов', is_superadmin=True)
@@ -627,6 +651,31 @@ async def process_callback_admin(callback_query: types.CallbackQuery):
 
     await bot.answer_callback_query(callback_query.id)
     await bot.send_message(callback_query.from_user.id, f"Пользователь с id {user_id} теперь является администратором.")
+
+
+@dp.message_handler(lambda message: message.text == 'Разжалование админов', is_superadmin=True)
+async def demote_admins(message: types.Message):
+    cursor.execute('SELECT * FROM users WHERE role = ?', ('admin',))
+    admins = cursor.fetchall()
+
+    for admin in admins:
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(InlineKeyboardButton("Разжаловать до пользователя", callback_data=f"demote_{admin[0]}"))
+        await bot.send_message(message.from_user.id,
+                               f"Администратор {admin[0]}:\nИмя: {admin[1]}",
+                               reply_markup=keyboard)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('demote_'), state='*')
+async def process_callback_demote(callback_query: types.CallbackQuery):
+    admin_id = callback_query.data.split('_')[1]
+
+    cursor.execute('UPDATE users SET role = ? WHERE id = ?', ('user', admin_id))
+    conn.commit()
+
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id,
+                           f"Администратор с id {admin_id} теперь является обычным пользователем.")
 
 
 if __name__ == '__main__':
