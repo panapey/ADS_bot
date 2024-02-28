@@ -2,7 +2,7 @@ import json
 import sqlite3
 
 import aiogram
-from aiogram import Bot, Dispatcher, types, filters
+from aiogram import Bot, Dispatcher, types
 from aiogram import executor
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
@@ -34,6 +34,7 @@ cursor.execute('''
     user_id INT,
     subject VARCHAR(255),
     text TEXT,
+    photo VARCHAR(255),
     status VARCHAR(255),
     comment TEXT,
     message_id INT
@@ -90,6 +91,8 @@ class EditRequestForm(StatesGroup):
 class AdminForm(StatesGroup):
     request_id = State()
     new_status = State()
+    photo = State()
+    confirm = State()
 
 
 class RequestStatus(StatesGroup):
@@ -99,6 +102,9 @@ class RequestStatus(StatesGroup):
 class RequestForm(StatesGroup):
     subject = State()
     text = State()
+    ask_photo = State()
+    photo = State()
+    confirm = State()
 
 
 class AppealForm(StatesGroup):
@@ -127,8 +133,12 @@ class IsAdminFilter(aiogram.dispatcher.filters.BoundFilter):
     async def check(self, message: types.Message):
         user_id = message.from_user.id
         cursor.execute('SELECT role FROM users WHERE id = ?', (user_id,))
-        role = cursor.fetchone()[0]
-        return role == 'admin'
+        result = cursor.fetchone()
+        if result is not None:
+            role = result[0]
+            return role == 'admin'
+        else:
+            return False
 
 
 dp.filters_factory.bind(IsAdminFilter)
@@ -230,58 +240,102 @@ async def process_subject(message: types.Message, state: FSMContext):
 
 
 @dp.message_handler(state=RequestForm.text)
-async def create_request(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
+async def process_text(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
-        subject = data['subject']
-        text = message.text
+        data['text'] = message.text
+    await message.answer("Вы хотите прикрепить фотографию к заявке?",
+                         reply_markup=InlineKeyboardMarkup(
+                             inline_keyboard=[
+                                 [InlineKeyboardButton(text="Да", callback_data="yes"),
+                                  InlineKeyboardButton(text="Нет", callback_data="no")]
+                             ]
+                         ))
+    await RequestForm.ask_photo.set()
 
-    cursor.execute('INSERT INTO requests (user_id, subject, text, status) VALUES (?, ?, ?, ?)',
-                   (user_id, subject, text, 'Зарегистрирована'))
-    conn.commit()
-    cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
-    user = cursor.fetchone()
-    cursor.execute('SELECT * FROM requests WHERE subject = ?', (subject,))
-    requests = cursor.fetchone()
 
-    chat_id = CHAT_ID
-    sent_message = await bot.send_message(chat_id,
-                                          f"Новая заявка от {user[5]}:\nНомер заявки: {requests[0]} \n"
-                                          f"Подразделение: {user[4]}\n"
-                                          f"Тема: {subject}\nТекст: {text}")
+@dp.message_handler(state=RequestForm.text)
+async def process_text(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['text'] = message.text
+    await message.answer("Пожалуйста, прикрепите фотографию к заявке.")
+    await RequestForm.photo.set()
 
-    cursor.execute('UPDATE requests SET message_id = ? WHERE id = ?',
-                   (sent_message.message_id, requests[0]))
-    conn.commit()
-    await message.answer(f"Ваша заявка №{requests[0]} \' {subject}\' успешно создана и зарегистрирована",
-                         reply_markup=keyboard)
+
+@dp.callback_query_handler(lambda c: c.data in ['yes', 'no'], state=RequestForm.ask_photo)
+async def process_ask_photo(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == 'yes':
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, "Пожалуйста, прикрепите фотографию.")
+        await RequestForm.photo.set()
+    else:
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id,
+                               "Ваша заявка готова к отправке. Вы хотите отправить ее сейчас?",
+                               reply_markup=InlineKeyboardMarkup(
+                                   inline_keyboard=[
+                                       [InlineKeyboardButton(text="Да", callback_data="yes"),
+                                        InlineKeyboardButton(text="Нет", callback_data="no")]
+                                   ]
+                               ))
+        await RequestForm.confirm.set()
+
+
+@dp.message_handler(state=RequestForm.photo, content_types=types.ContentType.PHOTO)
+async def process_photo(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['photo'] = message.photo[-1].file_id
+    await message.answer("Вы хотите сохранить эти изменения?",
+                         reply_markup=InlineKeyboardMarkup(
+                             inline_keyboard=[
+                                 [InlineKeyboardButton(text="Да", callback_data="yes"),
+                                  InlineKeyboardButton(text="Нет", callback_data="no")]
+                             ]
+                         ))
+    await RequestForm.confirm.set()
+
+
+@dp.callback_query_handler(lambda c: c.data in ['yes', 'no'], state=RequestForm.confirm)
+async def process_confirm(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == 'yes':
+        user_id = callback_query.from_user.id
+        async with state.proxy() as data:
+            subject = data['subject']
+            text = data['text']
+            photo = data.get('photo')
+
+        cursor.execute('INSERT INTO requests (user_id, subject, text, photo, status) VALUES (?, ?, ?, ?, ?)',
+                       (user_id, subject, text, photo,
+                        'Зарегистрирована'))
+        conn.commit()
+        cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+        user = cursor.fetchone()
+        cursor.execute('SELECT * FROM requests WHERE subject = ?', (subject,))
+        requests = cursor.fetchone()
+
+        chat_id = CHAT_ID
+        if photo is not None:
+            sent_message = await bot.send_photo(chat_id, photo,
+                                                caption=f"Новая заявка от {user[5]}:\nНомер заявки: {requests[0]} \n"
+                                                        f"Подразделение: {user[4]}\n"
+                                                        f"Тема: {subject}\nТекст: {text}")
+            cursor.execute('UPDATE requests SET message_id = ? WHERE id = ?',
+                           (sent_message.message_id, requests[0]))
+            conn.commit()
+        else:
+            await bot.send_message(chat_id,
+                                   f"Новая заявка от {user[5]}:\nНомер заявки: {requests[0]} \n"
+                                   f"Подразделение: {user[4]}\n"
+                                   f"Тема: {subject}\nТекст: {text}")
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id,
+                               f"Ваша заявка №{requests[0]} \' {subject}\' успешно создана и зарегистрирована",
+                               reply_markup=keyboard)
+    else:
+        await bot.send_message(callback_query.from_user.id, "Ваша заявка не была отправлена.", reply_markup=keyboard)
+
+    await bot.delete_message(callback_query.from_user.id, callback_query.message.message_id)
+
     await state.finish()
-
-
-@dp.message_handler(filters.Regexp(r'^[^,]+,[^,]+$'))
-async def create_request(message: types.Message):
-    user_id = message.from_user.id
-    subject, text = map(str.strip, message.text.split(','))
-
-    cursor.execute('INSERT INTO requests (user_id, subject, text, status) VALUES (?, ?, ?, ?)',
-                   (user_id, subject, text, 'Зарегистрирована'))
-    conn.commit()
-
-    cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
-    user = cursor.fetchone()
-    cursor.execute('SELECT * FROM requests WHERE subject = ?', (subject,))
-    requests = cursor.fetchone()
-
-    chat_id = CHAT_ID
-    sent_message = await bot.send_message(chat_id,
-                                          f"Новая заявка от {user[5]}:\nНомер заявки: {requests[0]} \n"
-                                          f"Подразделение: {user[4]}\nТема: {subject}\nТекст: {text}")
-
-    cursor.execute('UPDATE requests SET message_id = ? WHERE id = ?',
-                   (sent_message.message_id, requests[0]))
-    conn.commit()
-
-    await message.answer("Ваша заявка успешно создана и зарегистрирована", reply_markup=keyboard)
 
 
 @dp.message_handler(lambda message: message.text == 'Проверить статус')
@@ -304,7 +358,7 @@ async def check_status(message: types.Message):
             await bot.send_message(
                 user_id,
                 f"Заявка {request[0]}:\nПодразделение: {user[4]}\nФИО: {user[5]}\nТема: {request[2]}\n"
-                f"Текст: {request[3]}\nСтатус: {request[4]}",
+                f"Текст: {request[3]}\nСтатус: {request[5]}",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
                         [InlineKeyboardButton(text="Редактировать заявку", callback_data=f"edit_request:{request[0]}")]
@@ -491,9 +545,15 @@ async def view_all_requests(message: types.Message):
         for request in requests:
             cursor.execute('SELECT * FROM users WHERE id = ?', (request[1],))
             user = cursor.fetchone()
-            await bot.send_message(message.from_user.id,
-                                   f"Заявка {request[0]}:\nСоздатель: {user[5]}\nОрганизация: {user[4]}\n"
-                                   f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[4]}")
+            photo = request[4]
+            if photo is not None:
+                await bot.send_photo(message.from_user.id, photo,
+                                     caption=f"Заявка {request[0]}:\nСоздатель: {user[5]}\nОрганизация: {user[4]}\n"
+                                             f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[5]}")
+            else:
+                await bot.send_message(message.from_user.id,
+                                       f"Заявка {request[0]}:\nСоздатель: {user[5]}\nОрганизация: {user[4]}\n"
+                                       f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[5]}")
     else:
         await message.answer("Вы не являетесь администратором!")
 
@@ -514,7 +574,7 @@ async def view_completed_requests(message: types.Message):
             user = cursor.fetchone()
             await bot.send_message(message.from_user.id,
                                    f"Заявка {request[0]}:\nСоздатель: {user[5]}\nОрганизация: {user[4]}\n"
-                                   f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[4]}")
+                                   f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[5]}")
     else:
         await message.answer("Вы не являетесь администратором!")
 
@@ -535,7 +595,7 @@ async def view_in_progress_requests(message: types.Message):
             user = cursor.fetchone()
             await bot.send_message(message.from_user.id,
                                    f"Заявка {request[0]}:\nСоздатель: {user[5]}\nОрганизация: {user[4]}\n"
-                                   f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[4]}")
+                                   f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[5]}")
     else:
         await message.answer("Вы не являетесь администратором!")
 
@@ -556,8 +616,8 @@ async def view_in_progress_requests(message: types.Message):
             user = cursor.fetchone()
             await bot.send_message(message.from_user.id,
                                    f"Заявка {request[0]}:\nСоздатель: {user[5]}\nОрганизация: {user[4]}\n"
-                                   f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[4]}"
-                                   f"\nКомментарий: {request[5]}")
+                                   f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[5]}"
+                                   f"\nКомментарий: {request[6]}")
     else:
         await message.answer("Вы не являетесь администратором!")
 
@@ -579,7 +639,7 @@ async def change_request_status(message: types.Message):
             keyboard.add(InlineKeyboardButton("Выполнена", callback_data=f"done_{request[0]}"))
             await bot.send_message(message.from_user.id,
                                    f"Заявка {request[0]}:\nТема: {request[2]}\nТекст: {request[3]}\n"
-                                   f"Статус: {request[4]}",
+                                   f"Статус: {request[5]}",
                                    reply_markup=keyboard)
     else:
         await message.answer("Вы не являетесь администратором!")
@@ -588,17 +648,19 @@ async def change_request_status(message: types.Message):
 @dp.callback_query_handler(lambda c: c.data.startswith('accept_'), state='*')
 async def process_callback_accept(callback_query: types.CallbackQuery, state: FSMContext):
     request_id = callback_query.data.split('_')[1]
-    print(request_id)
+    admin_id = callback_query.from_user.id
+
     cursor.execute('UPDATE requests SET status = ? WHERE id = ?', ('Принята в работу', request_id))
     conn.commit()
 
     cursor.execute('SELECT * FROM requests WHERE id = ?', (request_id,))
     request = cursor.fetchone()
-    print(request)
-    cursor.execute('SELECT * FROM users WHERE id = ?', (request[1],))
-    user = cursor.fetchone()
+    cursor.execute('SELECT * FROM users WHERE id = ?', (admin_id,))
+    admin = cursor.fetchone()
 
-    await bot.send_message(user[0], f"Статус вашей заявки {request_id} обновлен до 'Принята в работу'")
+    if admin[2] == 'admin':
+        await bot.send_message(request[1],
+                               f"Ваша заявка {request_id} была принята к исполнению администратором {admin[1]}.")
 
     await bot.answer_callback_query(callback_query.id)
     await bot.send_message(callback_query.from_user.id, f"Статус заявки {request_id} обновлен до 'Принята в работу'")
@@ -632,32 +694,65 @@ async def process_comment(message: types.Message, state: FSMContext):
 @dp.callback_query_handler(lambda c: c.data.startswith('done_'), state='*')
 async def process_callback_done(callback_query: types.CallbackQuery, state: FSMContext):
     request_id = callback_query.data.split('_')[1]
-
-    cursor.execute('UPDATE requests SET status = ? WHERE id = ?', ('Выполнена', request_id))
-    conn.commit()
-
-    cursor.execute('SELECT * FROM requests WHERE id = ?', (request_id,))
-    request = cursor.fetchone()
-
-    cursor.execute('SELECT * FROM users WHERE id = ?', (request[1],))
-    user = cursor.fetchone()
-    print(request[1])
-    keyboard = InlineKeyboardMarkup()
-    keyboard.add(InlineKeyboardButton("Принять выполнение", callback_data=f"accept_done_{request_id}"))
-    keyboard.add(InlineKeyboardButton("Обжаловать", callback_data=f"appeal_{request_id}"))
-
-    await bot.send_message(user[0], f"Статус вашей заявки {request_id} обновлен до 'Выполнена'. Вы согласны с этим?",
-                           reply_markup=keyboard)
-
+    await state.update_data(request_id=request_id)
     await bot.answer_callback_query(callback_query.id)
-    await bot.send_message(callback_query.from_user.id, f"Статус заявки {request_id} обновлен до 'Выполнена'")
+    await bot.send_message(callback_query.from_user.id, "Пожалуйста, прикрепите фотографию к заявке.")
+    await AdminForm.photo.set()
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith('accept_done_'), state='*')
+@dp.message_handler(state=AdminForm.photo, content_types=types.ContentType.PHOTO)
+async def process_photo(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['photo'] = message.photo[-1].file_id
+    await message.answer("Вы хотите сохранить эти изменения?",
+                         reply_markup=InlineKeyboardMarkup(
+                             inline_keyboard=[
+                                 [InlineKeyboardButton(text="Да", callback_data="yes"),
+                                  InlineKeyboardButton(text="Нет", callback_data="no")]
+                             ]
+                         ))
+    await AdminForm.confirm.set()
+
+
+@dp.callback_query_handler(lambda c: c.data in ['yes', 'no'], state=AdminForm.confirm)
+async def process_confirm(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == 'yes':
+        async with state.proxy() as data:
+            request_id = data['request_id']
+            photo = data['photo']
+
+        cursor.execute('UPDATE requests SET status = ?, photo = ? WHERE id = ?', ('Выполнена', photo, request_id))
+        conn.commit()
+
+        cursor.execute('SELECT * FROM requests WHERE id = ?', (request_id,))
+        request = cursor.fetchone()
+
+        cursor.execute('SELECT * FROM users WHERE id = ?', (request[1],))
+        user = cursor.fetchone()
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(InlineKeyboardButton("Принять выполнение", callback_data=f"acceptdone_{request_id}"))
+        keyboard.add(InlineKeyboardButton("Обжаловать", callback_data=f"appeal_{request_id}"))
+
+        await bot.send_photo(user[0], photo,
+                             caption=f"Статус вашей заявки {request_id} обновлен до 'Выполнена'. Вы согласны с этим?",
+                             reply_markup=keyboard)
+
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id, f"Статус заявки {request_id} обновлен до 'Выполнена'")
+    else:
+        await bot.send_message(callback_query.from_user.id, "Ваша заявка не была отправлена.")
+
+    await bot.delete_message(callback_query.from_user.id, callback_query.message.message_id)
+
+    await state.finish()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('acceptdone_'), state='*')
 async def process_callback_accept_done(callback_query: types.CallbackQuery, state: FSMContext):
     request_id = callback_query.data.split('_')[1]
     cursor.execute('SELECT * FROM requests WHERE id = ?', (request_id,))
     request = cursor.fetchone()
+    print(request)
     if request is not None:
         user_id = request[1]
         cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
