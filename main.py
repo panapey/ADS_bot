@@ -82,14 +82,15 @@ class Form(StatesGroup):
     organization = State()
 
 
-class EditForm(StatesGroup):
+class EditProfileForm(StatesGroup):
+    choice = State()
     full_name = State()
-    city = State()
     organization = State()
     confirm = State()
 
 
 class EditRequestForm(StatesGroup):
+    choice = State()
     subject = State()
     text = State()
     confirm = State()
@@ -308,7 +309,6 @@ async def process_confirm(callback_query: types.CallbackQuery, state: FSMContext
         conn.commit()
         cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
         user = cursor.fetchone()
-        print(user)
         cursor.execute('SELECT * FROM requests WHERE subject = ?', (subject,))
         requests = cursor.fetchone()
 
@@ -318,15 +318,20 @@ async def process_confirm(callback_query: types.CallbackQuery, state: FSMContext
                                                 caption=f"Новая заявка от {user[5]}\nНомер заявки: {requests[0]} \n"
                                                         f"Подразделение: {user[4]}\nАдрес: {user[3]}\n"
                                                         f"Тема: {subject}\nТекст: {text}\n"
+                                                        f"Статус: {requests[5]} 📝\n"
                                                         f"Дата и время заявки: {requests[8]}")
             cursor.execute('UPDATE requests SET message_id = ? WHERE id = ?',
                            (sent_message.message_id, requests[0]))
             conn.commit()
         else:
-            await bot.send_message(chat_id,
-                                   f"Новая заявка от {user[5]}:\nНомер заявки: {requests[0]} \n"
-                                   f"Подразделение: {user[4]}\nАдрес: {user[3]}\n"
-                                   f"Тема: {subject}\nТекст: {text}\nДата и время заявки: {requests[8]}")
+            sent_message = await bot.send_message(chat_id,
+                                                  f"Новая заявка от {user[5]}:\nНомер заявки: {requests[0]} \n"
+                                                  f"Подразделение: {user[4]}\nАдрес: {user[3]}\n"
+                                                  f"Тема: {subject}\nТекст: {text}\n"
+                                                  f"Статус: {requests[5]} 📝\nДата и время заявки: {requests[8]}")
+            cursor.execute('UPDATE requests SET message_id = ? WHERE id = ?',
+                           (sent_message.message_id, requests[0]))
+            conn.commit()
         await bot.answer_callback_query(callback_query.id)
         await bot.send_message(callback_query.from_user.id,
                                f"Ваша заявка №{requests[0]} \' {subject}\' успешно создана и зарегистрирована",
@@ -343,52 +348,87 @@ async def process_confirm(callback_query: types.CallbackQuery, state: FSMContext
 async def check_status(message: types.Message):
     user_id = message.from_user.id
 
-    cursor.execute('SELECT * FROM requests WHERE user_id = ?', (user_id,))
+    await bot.send_message(
+        user_id,
+        "Выберите категорию заявки:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Зарегистрированные", callback_data="check_status:registered")],
+                [InlineKeyboardButton(text="Принятые в работу и обжалованные",
+                                      callback_data="check_status:in_progress")],
+                [InlineKeyboardButton(text="Выполненные", callback_data="check_status:completed")]
+            ]
+        )
+    )
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('check_status:'), state='*')
+async def process_check_status(callback_query: types.CallbackQuery, state: FSMContext):
+    user_id = callback_query.from_user.id
+    status = callback_query.data.split(':')[1]
+
+    if status == 'registered':
+        cursor.execute('SELECT * FROM requests WHERE user_id = ? and status = ?', (user_id, "Зарегистрирована"))
+    elif status == 'in_progress':
+        cursor.execute('SELECT * FROM requests WHERE user_id = ? and status in (?, ?)',
+                       (user_id, "Принята в работу", "Обжалована"))
+    elif status == 'completed':
+        cursor.execute('SELECT * FROM requests WHERE user_id = ? and status = ?', (user_id, "Выполнена"))
+
     requests = cursor.fetchall()
 
     if not requests:
-        await message.answer("У вас нет заявок.")
+        await bot.send_message(user_id, "У вас нет заявок в этой категории.")
     else:
-
         for request in requests:
-            print(request)
-
             cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
             user = cursor.fetchone()
 
-            await bot.send_message(
-                user_id,
-                f"Заявка {request[0]}:\nПодразделение: {user[4]}\nАдрес: {user[3]}\nФИО: {user[5]}\n"
-                f"Тема: {request[2]}\n"
-                f"Текст: {request[3]}\nСтатус: {request[5]}",
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [InlineKeyboardButton(text="Редактировать заявку", callback_data=f"edit_request:{request[0]}")]
-                    ]
-                ))
+            if status == 'registered':
+                await bot.send_message(
+                    user_id,
+                    f"Заявка {request[0]}:\nПодразделение: {user[4]}\nАдрес: {user[3]}\nФИО: {user[5]}\n"
+                    f"Тема: {request[2]}\n"
+                    f"Текст: {request[3]}\nСтатус: {request[5]}",
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [InlineKeyboardButton(text="Редактировать заявку",
+                                                  callback_data=f"edit_request:{request[0]}")]
+                        ]
+                    )
+                )
+            else:
+                await bot.send_message(
+                    user_id,
+                    f"Заявка {request[0]}:\nПодразделение: {user[4]}\nАдрес: {user[3]}\nФИО: {user[5]}\n"
+                    f"Тема: {request[2]}\n"
+                    f"Текст: {request[3]}\nСтатус: {request[5]}"
+                )
+    await bot.delete_message(callback_query.from_user.id, callback_query.message.message_id)
+    await bot.answer_callback_query(callback_query.id)
 
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('edit_request:'))
+@dp.callback_query_handler(lambda c: c.data.startswith('edit_request:'))
 async def start_editing_request(callback_query: types.CallbackQuery):
     request_id = callback_query.data.split(':')[1]
     await bot.answer_callback_query(callback_query.id)
     state = dp.current_state(user=callback_query.from_user.id)
     await state.update_data(request_id=request_id)
-    await bot.send_message(callback_query.from_user.id, "Пожалуйста, введите новую тему заявки.")
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton("Редактировать тему", callback_data="edit_subject"))
+    keyboard.add(InlineKeyboardButton("Редактировать текст", callback_data="edit_text"))
+    await bot.send_message(callback_query.from_user.id, "Что вы хотите редактировать?", reply_markup=keyboard)
+    await EditRequestForm.choice.set()
 
-    cursor.execute('UPDATE requests SET registered_time = ? WHERE id = ?', (datetime.now(), request_id))
-    conn.commit()
 
-    await EditRequestForm.subject.set()
-
-
-@dp.message_handler(state=EditRequestForm.subject)
-async def process_subject(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        data['subject'] = message.text
-    await message.answer("Пожалуйста, введите новый текст заявки.")
-
-    await EditRequestForm.text.set()
+@dp.callback_query_handler(lambda c: c.data in ['edit_subject', 'edit_text'], state=EditRequestForm.choice)
+async def process_edit_choice(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == 'edit_subject':
+        await bot.send_message(callback_query.from_user.id, "Пожалуйста, введите новую тему заявки.")
+        await EditRequestForm.subject.set()
+    else:
+        await bot.send_message(callback_query.from_user.id, "Пожалуйста, введите новый текст заявки.")
+        await EditRequestForm.text.set()
 
 
 @dp.message_handler(state=EditRequestForm.text)
@@ -406,28 +446,49 @@ async def process_text(message: types.Message, state: FSMContext):
     await EditRequestForm.confirm.set()
 
 
+@dp.message_handler(state=EditRequestForm.subject)
+async def process_text(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['subject'] = message.text
+    await message.answer("Вы хотите сохранить эти изменения?",
+                         reply_markup=InlineKeyboardMarkup(
+                             inline_keyboard=[
+                                 [InlineKeyboardButton(text="Да", callback_data="yes"),
+                                  InlineKeyboardButton(text="Нет", callback_data="no")]
+                             ]
+                         ))
+
+    await EditRequestForm.confirm.set()
+
+
 @dp.callback_query_handler(lambda c: c.data in ['yes', 'no'], state=EditRequestForm.confirm)
 async def process_confirm(callback_query: types.CallbackQuery, state: FSMContext):
     if callback_query.data == 'yes':
-
         async with state.proxy() as data:
+            print(data)
             request_id = data['request_id']
-            subject = data['subject']
-            text = data['text']
-            cursor.execute('UPDATE requests SET subject = ?, text = ? WHERE id = ?',
-                           (subject, text, request_id))
+            subject = data.get('subject')
+            text = data.get('text')
+
+            if subject is not None:
+                cursor.execute('UPDATE requests SET subject = ? WHERE id = ?', (subject, request_id))
+
+            if text is not None:
+                cursor.execute('UPDATE requests SET text = ? WHERE id = ?', (text, request_id))
+
             conn.commit()
 
-        cursor.execute('SELECT message_id FROM requests WHERE id = ?', (request_id,))
-        message_id = cursor.fetchone()[0]
+        cursor.execute('SELECT * FROM requests WHERE id = ?', (request_id,))
+        request = cursor.fetchone()
 
         user_id = callback_query.from_user.id
         cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
         user = cursor.fetchone()
 
-        await bot.edit_message_text(chat_id=CHAT_ID, message_id=message_id,
+        await bot.edit_message_text(chat_id=CHAT_ID, message_id=request[7],
                                     text=f"Обновленная заявка от {user[5]}:\nНомер заявки: {request_id} \n"
-                                         f"Подразделение: {user[4]}\n\nАдрес: {user[3]}Тема: {subject}\nТекст: {text}")
+                                         f"Подразделение: {user[4]}\nТема: {request[2]}\nТекст: {request[3]}"
+                                         f"\nСтатус: {request[5]}")
 
         await bot.send_message(callback_query.from_user.id, "Ваша заявка успешно обновлена!", reply_markup=keyboard)
     else:
@@ -459,40 +520,51 @@ async def view_profile(message: types.Message):
 @dp.callback_query_handler(lambda c: c.data == 'edit')
 async def start_editing(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
-    await bot.send_message(callback_query.from_user.id, "Пожалуйста, введите ваше полное имя.")
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton("Редактировать ФИО", callback_data="edit_full_name"))
+    keyboard.add(InlineKeyboardButton("Редактировать организацию", callback_data="edit_organization"))
+    await bot.send_message(callback_query.from_user.id, "Что вы хотите редактировать?", reply_markup=keyboard)
+    await EditProfileForm.choice.set()
 
-    await EditForm.full_name.set()
+
+@dp.callback_query_handler(lambda c: c.data in ['edit_full_name', 'edit_organization'], state=EditProfileForm.choice)
+async def process_edit_choice(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == 'edit_full_name':
+        await bot.send_message(callback_query.from_user.id, "Пожалуйста, введите ваше полное имя.")
+        await EditProfileForm.full_name.set()
+    else:
+        await bot.send_message(callback_query.from_user.id, "Пожалуйста, выберите организацию из списка.",
+                               reply_markup=inline_kb_full)
+        await EditProfileForm.organization.set()
 
 
-@dp.message_handler(state=EditForm.full_name)
-async def process_full_name(message: types.Message, state: FSMContext):
+@dp.message_handler(state=EditProfileForm.full_name)
+async def process_text(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         data['full_name'] = message.text
-    await message.answer("Пожалуйста, введите ваш город.")
+    await message.answer("Вы хотите сохранить эти изменения?",
+                         reply_markup=InlineKeyboardMarkup(
+                             inline_keyboard=[
+                                 [InlineKeyboardButton(text="Да", callback_data="yes"),
+                                  InlineKeyboardButton(text="Нет", callback_data="no")]
+                             ]
+                         ))
 
-    await EditForm.city.set()
-
-
-@dp.message_handler(state=EditForm.city)
-async def process_city(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        data['city'] = message.text
-    await message.answer("Пожалуйста, выберите организацию из списка.", reply_markup=inline_kb_full)
-
-    await EditForm.organization.set()
+    await EditProfileForm.confirm.set()
 
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('org:'), state=EditForm.organization)
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('org:'), state=EditProfileForm.organization)
 async def process_callback_org(callback_query: types.CallbackQuery, state: FSMContext):
     org = callback_query.data.split(':')[1]
     async with state.proxy() as data:
         data['organization'] = org
+        data['city'] = org_addresses[org]
     await bot.answer_callback_query(callback_query.id)
     await bot.send_message(callback_query.from_user.id, f'Вы выбрали организацию {org}')
 
     await bot.edit_message_reply_markup(callback_query.from_user.id, callback_query.message.message_id)
 
-    await EditForm.confirm.set()
+    await EditProfileForm.confirm.set()
     await bot.send_message(callback_query.from_user.id, "Вы хотите сохранить эти изменения?",
                            reply_markup=InlineKeyboardMarkup(
                                inline_keyboard=[
@@ -502,20 +574,27 @@ async def process_callback_org(callback_query: types.CallbackQuery, state: FSMCo
                            ))
 
 
-@dp.callback_query_handler(lambda c: c.data in ['yes', 'no'], state=EditForm.confirm)
+@dp.callback_query_handler(lambda c: c.data in ['yes', 'no'], state=EditProfileForm.confirm)
 async def process_confirm(callback_query: types.CallbackQuery, state: FSMContext):
     if callback_query.data == 'yes':
-
         user_id = callback_query.from_user.id
         username = callback_query.from_user.username
         async with state.proxy() as data:
-            city = data['city']
-            org = data['organization']
-            full_name = data['full_name']
-            cursor.execute(
-                'UPDATE users SET username = ?, role = ?, city = ?, organization = ?, full_name = ? WHERE id = ?',
-                (username, 'user', city, org, full_name, user_id))
-            conn.commit()
+            full_name = data.get('full_name')
+            city = data.get('city')
+            org = data.get('organization')
+
+            if full_name is not None:
+                cursor.execute(
+                    'UPDATE users SET full_name = ? WHERE id = ?',
+                    (full_name, user_id))
+                conn.commit()
+
+            if city is not None and org is not None:
+                cursor.execute(
+                    'UPDATE users SET city = ?, organization = ? WHERE id = ?',
+                    (city, org, user_id))
+                conn.commit()
 
         await bot.send_message(callback_query.from_user.id, "Ваши данные успешно обновлены!", reply_markup=keyboard)
     else:
@@ -674,10 +753,18 @@ async def process_callback_accept(callback_query: types.CallbackQuery, state: FS
     request = cursor.fetchone()
     cursor.execute('SELECT * FROM users WHERE id = ?', (admin_id,))
     admin = cursor.fetchone()
+    cursor.execute('SELECT * FROM users WHERE id = ?', (request[1],))
+    user = cursor.fetchone()
 
     if admin[2] == 'admin':
         await bot.send_message(request[1],
-                               f"Ваша заявка {request_id} была принята к исполнению администратором {admin[1]}.")
+                               f"Ваша заявка {request_id} была принята к исполнению администратором {admin[5]}."
+                               f"\nВремя принятия заявки: {request[9]}")
+        await bot.edit_message_text(chat_id=CHAT_ID, message_id=request[7],
+                                    text=f"Администратор {admin[5]} обновил статус заявки\nот {user[5]}"
+                                         f"\nНомер заявки: {request_id}\n"
+                                         f"Подразделение: {user[4]}\nТема: {request[2]}\nТекст: {request[3]}"
+                                         f"\nСтатус: {request[5]} 🛠️\nВремя принятия: {request[9]}")
 
     await bot.answer_callback_query(callback_query.id)
     await bot.send_message(callback_query.from_user.id, f"Статус заявки {request_id} обновлен до 'Принята в работу'")
@@ -706,6 +793,17 @@ async def process_comment(message: types.Message, state: FSMContext):
     conn.commit()
     await message.answer("Ваш комментарий был добавлен к обжалованию заявки. Статус заявки обновлен до 'Обжалована'.")
     await bot.send_message(callback_query.from_user.id, f"Комментарий к обжалованию заявки {request_id}: {comment}")
+    cursor.execute('SELECT * FROM requests WHERE id = ?', (request_id,))
+    request = cursor.fetchone()
+
+    cursor.execute('SELECT * FROM users WHERE id = ?', (request[1],))
+    user = cursor.fetchone()
+    await bot.edit_message_text(chat_id=CHAT_ID, message_id=request[7],
+                                text=f"Пользователь {user[5]}\nобжаловал выполнение заявки"
+                                     f"\nНомер заявки: {request_id}\n"
+                                     f"Подразделение: {user[4]}\nТема: {request[2]}\n"
+                                     f"Текст: {request[3]}\nКомментарий: {comment}\n"
+                                     f"Статус: {request[5]} ⚠️\nВремя обжалования: {request[10]}")
     await state.finish()
 
 
@@ -781,6 +879,11 @@ async def process_callback_accept_done(callback_query: types.CallbackQuery, stat
             conn.commit()
             await bot.answer_callback_query(callback_query.id)
             await bot.send_message(callback_query.from_user.id, f"Вы приняли выполнение заявки {request_id}.")
+            await bot.edit_message_text(chat_id=CHAT_ID, message_id=request[7],
+                                        text=f"Пользователь {user[5]}\nпринял выполнение заявки"
+                                             f"\nНомер заявки: {request_id}\n"
+                                             f"Подразделение: {user[4]}\nТема: {request[2]}\nТекст: {request[3]}"
+                                             f"\nСтатус: {request[5]} ✅\nВремя выполнения: {request[11]}")
         else:
             await bot.send_message(callback_query.from_user.id, "Пользователь не найден.")
     else:
