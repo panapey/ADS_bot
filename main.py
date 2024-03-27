@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 from datetime import datetime
 
@@ -39,12 +40,14 @@ cursor.execute('''
     text TEXT,
     photo VARCHAR(255),
     status VARCHAR(255),
+    organization VARCHAR(255),
     comment TEXT,
     message_id INT,
     registered_time DATETIME DEFAULT CURRENT_TIMESTAMP,
     accepted_time DATETIME,
     appealed_time DATETIME,
-    completed_time DATETIME
+    completed_time DATETIME,
+    phonenum VARCHAR(255)
 );
 ''')
 
@@ -66,8 +69,12 @@ buttons = ["Просмотреть новые заявки", "Просмотре
 admin_keyboard.add(*buttons)
 
 superadmin_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-buttons = ["Регистрация админов", "Разжалование админов"]
+buttons = ["Регистрация админов", "Разжалование админов", "Регистрация диспетчеров", "Разжалование диспетчеров"]
 superadmin_keyboard.add(*buttons)
+
+dispmau_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
+buttons = ["Создать заявку за пользователя", "Проверить статус заявок"]
+dispmau_keyboard.add(*buttons)
 
 inline_kb_full = InlineKeyboardMarkup(row_width=2)
 
@@ -115,6 +122,14 @@ class RequestForm(StatesGroup):
     confirm = State()
 
 
+class RequestMauForm(StatesGroup):
+    subject = State()
+    text = State()
+    phonenum = State()
+    confirm = State()
+    organization = State()
+
+
 class AppealForm(StatesGroup):
     comment = State()
 
@@ -152,6 +167,46 @@ class IsAdminFilter(aiogram.dispatcher.filters.BoundFilter):
 dp.filters_factory.bind(IsAdminFilter)
 
 
+class IsDispMauFilter(aiogram.dispatcher.filters.BoundFilter):
+    key = 'is_disp_mau'
+
+    def __init__(self, is_disp_mau):
+        self.is_disp_mau = is_disp_mau
+
+    async def check(self, message: types.Message):
+        user_id = message.from_user.id
+        cursor.execute('SELECT role FROM users WHERE id = ?', (user_id,))
+        result = cursor.fetchone()
+        if result is not None:
+            role = result[0]
+            return role == 'disp_mau'
+        else:
+            return False
+
+
+dp.filters_factory.bind(IsDispMauFilter)
+
+mask = "+7(<!^\\d{0,3}$>)<!^\\d{0,7}$>"
+
+
+def tel_format(phone, mask):
+    block_reg_exp = "<!.*?>"
+    while True:
+        found_block = re.search(block_reg_exp, mask)
+        if found_block is None:
+            break
+        block = found_block.group(0)
+        temporary_mask = "#" * int(re.search(r",\d+", block).group(0)[1:])
+        mask = mask.replace(found_block.group(0), temporary_mask)
+
+    phone = [digit for digit in phone if digit.isdigit()][1:]
+    phone_mask = list(mask)
+    for i, elem in enumerate(phone_mask):
+        if elem == "#":
+            phone_mask[i] = phone.pop(0)
+    return "".join(phone_mask)
+
+
 @dp.message_handler(commands='start')
 async def start(message: types.Message):
     user_id = message.from_user.id
@@ -166,6 +221,8 @@ async def start(message: types.Message):
             await message.answer("Добро пожаловать, администратор!", reply_markup=admin_keyboard)
         elif role == 'superadmin':
             await message.answer("Добро пожаловать, суперадминистратор!", reply_markup=superadmin_keyboard)
+        elif role == 'disp_mau':
+            await message.answer("Добро пожаловать, диспетчер МАУ!", reply_markup=dispmau_keyboard)
         else:
             await message.answer("Вы уже зарегистрированы!", reply_markup=keyboard)
     else:
@@ -266,7 +323,9 @@ async def process_ask_photo(callback_query: types.CallbackQuery, state: FSMConte
     if callback_query.data == 'yes':
         await bot.answer_callback_query(callback_query.id)
         await bot.send_message(callback_query.from_user.id, "Пожалуйста, прикрепите фотографию.")
+        await bot.delete_message(callback_query.from_user.id, callback_query.message.message_id)
         await RequestForm.photo.set()
+
     else:
         await bot.answer_callback_query(callback_query.id)
         await bot.send_message(callback_query.from_user.id,
@@ -277,6 +336,7 @@ async def process_ask_photo(callback_query: types.CallbackQuery, state: FSMConte
                                         InlineKeyboardButton(text="Нет", callback_data="no")]
                                    ]
                                ))
+        await bot.delete_message(callback_query.from_user.id, callback_query.message.message_id)
         await RequestForm.confirm.set()
 
 
@@ -319,7 +379,7 @@ async def process_confirm(callback_query: types.CallbackQuery, state: FSMContext
                                                         f"Подразделение: {user[4]}\nАдрес: {user[3]}\n"
                                                         f"Тема: {subject}\nТекст: {text}\n"
                                                         f"Статус: {requests[5]} 📝\n"
-                                                        f"Дата и время заявки: {requests[8]}")
+                                                        f"Дата и время заявки: {requests[9]}")
             cursor.execute('UPDATE requests SET message_id = ? WHERE id = ?',
                            (sent_message.message_id, requests[0]))
             conn.commit()
@@ -328,7 +388,7 @@ async def process_confirm(callback_query: types.CallbackQuery, state: FSMContext
                                                   f"Новая заявка от {user[5]}:\nНомер заявки: {requests[0]} \n"
                                                   f"Подразделение: {user[4]}\nАдрес: {user[3]}\n"
                                                   f"Тема: {subject}\nТекст: {text}\n"
-                                                  f"Статус: {requests[5]} 📝\nДата и время заявки: {requests[8]}")
+                                                  f"Статус: {requests[5]} 📝\nДата и время заявки: {requests[9]}")
             cursor.execute('UPDATE requests SET message_id = ? WHERE id = ?',
                            (sent_message.message_id, requests[0]))
             conn.commit()
@@ -513,6 +573,7 @@ async def view_profile(message: types.Message):
                                        [InlineKeyboardButton(text="Редактировать профиль", callback_data="edit")]
                                    ]
                                ))
+
     else:
         await bot.send_message(user_id, "Вы не зарегистрированы!")
 
@@ -520,6 +581,7 @@ async def view_profile(message: types.Message):
 @dp.callback_query_handler(lambda c: c.data == 'edit')
 async def start_editing(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
+    await bot.edit_message_reply_markup(callback_query.from_user.id, callback_query.message.message_id)
     keyboard = InlineKeyboardMarkup()
     keyboard.add(InlineKeyboardButton("Редактировать ФИО", callback_data="edit_full_name"))
     keyboard.add(InlineKeyboardButton("Редактировать организацию", callback_data="edit_organization"))
@@ -530,9 +592,11 @@ async def start_editing(callback_query: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data in ['edit_full_name', 'edit_organization'], state=EditProfileForm.choice)
 async def process_edit_choice(callback_query: types.CallbackQuery, state: FSMContext):
     if callback_query.data == 'edit_full_name':
+        await bot.edit_message_reply_markup(callback_query.from_user.id, callback_query.message.message_id)
         await bot.send_message(callback_query.from_user.id, "Пожалуйста, введите ваше полное имя.")
         await EditProfileForm.full_name.set()
     else:
+        await bot.edit_message_reply_markup(callback_query.from_user.id, callback_query.message.message_id)
         await bot.send_message(callback_query.from_user.id, "Пожалуйста, выберите организацию из списка.",
                                reply_markup=inline_kb_full)
         await EditProfileForm.organization.set()
@@ -635,13 +699,13 @@ async def view_all_requests(message: types.Message):
                                      caption=f"Заявка {request[0]}:\nСоздатель: {user[5]}\nОрганизация: {user[4]}"
                                              f"\nАдрес: {user[3]}\n"
                                              f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[5]}"
-                                             f"\nДата и время заявки: {request[8]}")
+                                             f"\nДата и время заявки: {request[9]}")
             else:
                 await bot.send_message(message.from_user.id,
                                        f"Заявка {request[0]}:\nСоздатель: {user[5]}\nОрганизация: {user[4]}"
                                        f"\nАдрес: {user[3]}\n"
                                        f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[5]}"
-                                       f"\nДата и время заявки: {request[8]}")
+                                       f"\nДата и время заявки: {request[9]}")
     else:
         await message.answer("Вы не являетесь администратором!")
 
@@ -664,7 +728,7 @@ async def view_completed_requests(message: types.Message):
                                    f"Заявка {request[0]}:\nСоздатель: {user[5]}\nОрганизация: {user[4]}"
                                    f"\nАдрес: {user[3]}\n"
                                    f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[5]}"
-                                   f"\nДата и время заявки: {request[11]}")
+                                   f"\nДата и время заявки: {request[12]}")
     else:
         await message.answer("Вы не являетесь администратором!")
 
@@ -687,7 +751,7 @@ async def view_in_progress_requests(message: types.Message):
                                    f"Заявка {request[0]}:\nСоздатель: {user[5]}\nОрганизация: {user[4]}"
                                    f"\nАдрес: {user[3]}\n"
                                    f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[5]}"
-                                   f"\nДата и время заявки: {request[9]}")
+                                   f"\nДата и время заявки: {request[10]}")
     else:
         await message.answer("Вы не являетесь администратором!")
 
@@ -710,7 +774,7 @@ async def view_in_progress_requests(message: types.Message):
                                    f"Заявка {request[0]}:\nСоздатель: {user[5]}\nОрганизация: {user[4]}"
                                    f"\nАдрес: {user[3]}\n"
                                    f"Тема: {request[2]}\nТекст: {request[3]}\nСтатус: {request[5]}"
-                                   f"\nДата и время заявки: {request[10]}"
+                                   f"\nДата и время заявки: {request[11]}"
                                    f"\nКомментарий: {request[6]}")
     else:
         await message.answer("Вы не являетесь администратором!")
@@ -755,19 +819,34 @@ async def process_callback_accept(callback_query: types.CallbackQuery, state: FS
     admin = cursor.fetchone()
     cursor.execute('SELECT * FROM users WHERE id = ?', (request[1],))
     user = cursor.fetchone()
+    if request[4] is None:
+        if admin[2] == 'admin':
+            await bot.send_message(request[1],
+                                   f"Ваша заявка {request_id} была принята к исполнению администратором {admin[5]}."
+                                   f"\nВремя принятия заявки: {request[9]}")
+            await bot.edit_message_text(chat_id=CHAT_ID, message_id=request[8],
+                                        text=f"Администратор {admin[5]} обновил статус заявки\nот {user[5]}"
+                                             f"\nНомер заявки: {request_id}\n"
+                                             f"Подразделение: {user[4]}\nТема: {request[2]}\nТекст: {request[3]}"
+                                             f"\nСтатус: {request[5]} 🛠️\nВремя принятия: {request[10]}")
 
-    if admin[2] == 'admin':
-        await bot.send_message(request[1],
-                               f"Ваша заявка {request_id} была принята к исполнению администратором {admin[5]}."
-                               f"\nВремя принятия заявки: {request[9]}")
-        await bot.edit_message_text(chat_id=CHAT_ID, message_id=request[7],
-                                    text=f"Администратор {admin[5]} обновил статус заявки\nот {user[5]}"
-                                         f"\nНомер заявки: {request_id}\n"
-                                         f"Подразделение: {user[4]}\nТема: {request[2]}\nТекст: {request[3]}"
-                                         f"\nСтатус: {request[5]} 🛠️\nВремя принятия: {request[9]}")
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id,
+                               f"Статус заявки {request_id} обновлен до 'Принята в работу'")
+    else:
+        if admin[2] == 'admin':
+            await bot.send_message(request[1],
+                                   f"Ваша заявка {request_id} была принята к исполнению администратором {admin[5]}."
+                                   f"\nВремя принятия заявки: {request[9]}")
+            await bot.edit_message_caption(chat_id=CHAT_ID, message_id=request[8],
+                                           caption=f"Администратор {admin[5]} обновил статус заявки\nот {user[5]}"
+                                                   f"\nНомер заявки: {request_id}\n"
+                                                   f"Подразделение: {user[4]}\nТема: {request[2]}\nТекст: {request[3]}"
+                                                   f"\nСтатус: {request[5]} 🛠️\nВремя принятия: {request[10]}")
 
-    await bot.answer_callback_query(callback_query.id)
-    await bot.send_message(callback_query.from_user.id, f"Статус заявки {request_id} обновлен до 'Принята в работу'")
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id,
+                               f"Статус заявки {request_id} обновлен до 'Принята в работу'")
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith('appeal_'), state='*')
@@ -798,13 +877,22 @@ async def process_comment(message: types.Message, state: FSMContext):
 
     cursor.execute('SELECT * FROM users WHERE id = ?', (request[1],))
     user = cursor.fetchone()
-    await bot.edit_message_text(chat_id=CHAT_ID, message_id=request[7],
-                                text=f"Пользователь {user[5]}\nобжаловал выполнение заявки"
-                                     f"\nНомер заявки: {request_id}\n"
-                                     f"Подразделение: {user[4]}\nТема: {request[2]}\n"
-                                     f"Текст: {request[3]}\nКомментарий: {comment}\n"
-                                     f"Статус: {request[5]} ⚠️\nВремя обжалования: {request[10]}")
-    await state.finish()
+    if request[4] is None:
+        await bot.edit_message_text(chat_id=CHAT_ID, message_id=request[8],
+                                    text=f"Пользователь {user[5]}\nобжаловал выполнение заявки"
+                                         f"\nНомер заявки: {request_id}\n"
+                                         f"Подразделение: {user[4]}\nТема: {request[2]}\n"
+                                         f"Текст: {request[3]}\nКомментарий: {comment}\n"
+                                         f"Статус: {request[5]} ⚠️\nВремя обжалования: {request[11]}")
+        await state.finish()
+    else:
+        await bot.edit_message_caption(chat_id=CHAT_ID, message_id=request[8],
+                                       caption=f"Пользователь {user[5]}\nобжаловал выполнение заявки"
+                                               f"\nНомер заявки: {request_id}\n"
+                                               f"Подразделение: {user[4]}\nТема: {request[2]}\n"
+                                               f"Текст: {request[3]}\nКомментарий: {comment}\n"
+                                               f"Статус: {request[5]} ⚠️\nВремя обжалования: {request[11]}")
+        await state.finish()
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith('done_'), state='*')
@@ -874,16 +962,31 @@ async def process_callback_accept_done(callback_query: types.CallbackQuery, stat
         user_id = request[1]
         cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
         user = cursor.fetchone()
+
         if user is not None:
             cursor.execute('UPDATE requests SET status = ? WHERE id = ?', ('Выполнена', request_id))
             conn.commit()
-            await bot.answer_callback_query(callback_query.id)
-            await bot.send_message(callback_query.from_user.id, f"Вы приняли выполнение заявки {request_id}.")
-            await bot.edit_message_text(chat_id=CHAT_ID, message_id=request[7],
-                                        text=f"Пользователь {user[5]}\nпринял выполнение заявки"
-                                             f"\nНомер заявки: {request_id}\n"
-                                             f"Подразделение: {user[4]}\nТема: {request[2]}\nТекст: {request[3]}"
-                                             f"\nСтатус: {request[5]} ✅\nВремя выполнения: {request[11]}")
+            if request[4] is None:
+                await bot.answer_callback_query(callback_query.id)
+                await bot.send_message(callback_query.from_user.id, f"Вы приняли выполнение заявки {request_id}.")
+
+                await bot.edit_message_reply_markup(callback_query.from_user.id, callback_query.message.message_id)
+                await bot.edit_message_text(chat_id=CHAT_ID, message_id=request[8],
+                                            text=f"Пользователь {user[5]}\nпринял выполнение заявки"
+                                                 f"\nНомер заявки: {request_id}\n"
+                                                 f"Подразделение: {user[4]}\nТема: {request[2]}\nТекст: {request[3]}"
+                                                 f"\nСтатус: {request[5]} ✅\nВремя выполнения: {request[12]}")
+            else:
+                await bot.answer_callback_query(callback_query.id)
+                await bot.send_message(callback_query.from_user.id, f"Вы приняли выполнение заявки {request_id}.")
+
+                await bot.edit_message_reply_markup(callback_query.from_user.id, callback_query.message.message_id)
+                await bot.edit_message_caption(chat_id=CHAT_ID, message_id=request[8],
+                                               caption=f"Пользователь {user[5]}\nпринял выполнение заявки"
+                                                       f"\nНомер заявки: {request_id}\n"
+                                                       f"Подразделение: {user[4]}\nТема: {request[2]}\n"
+                                                       f"Текст: {request[3]}"
+                                                       f"\nСтатус: {request[5]} ✅\nВремя выполнения: {request[12]}")
         else:
             await bot.send_message(callback_query.from_user.id, "Пользователь не найден.")
     else:
@@ -900,6 +1003,7 @@ async def process_callback_appeal(callback_query: types.CallbackQuery, state: FS
     await bot.answer_callback_query(callback_query.id)
     await bot.send_message(callback_query.from_user.id,
                            f"Вы обжаловали выполнение заявки {request_id}. Статус заявки обновлен до 'Обжалована'.")
+    await bot.edit_message_reply_markup(callback_query.from_user.id, callback_query.message.message_id)
 
 
 @dp.message_handler(lambda message: message.text == 'Регистрация админов', is_superadmin=True)
@@ -910,7 +1014,7 @@ async def register_admins(message: types.Message):
     user = cursor.fetchone()
 
     if user:
-        admins = ['admin', 'superadmin']
+        admins = ['admin', 'disp_mau', 'superadmin']
         for admin in admins:
             cursor.execute('SELECT * FROM users WHERE role !=?', (admin,))
             users = cursor.fetchall()
@@ -919,7 +1023,7 @@ async def register_admins(message: types.Message):
             keyboard = InlineKeyboardMarkup()
             keyboard.add(InlineKeyboardButton("Сделать администратором", callback_data=f"admin_{user[0]}"))
             await bot.send_message(message.from_user.id,
-                                   f"Пользователь {user[0]}:\nИмя: {user[1]}\nРоль: {user[2]}",
+                                   f"Пользователь {user[0]}:\nИмя: {user[5]}\nОрга: {user[4]}\nРоль: {user[2]}",
                                    reply_markup=keyboard)
     else:
         await message.answer("Вы не являетесь администратором!")
@@ -945,7 +1049,7 @@ async def demote_admins(message: types.Message):
         keyboard = InlineKeyboardMarkup()
         keyboard.add(InlineKeyboardButton("Разжаловать до пользователя", callback_data=f"demote_{admin[0]}"))
         await bot.send_message(message.from_user.id,
-                               f"Администратор {admin[0]}:\nИмя: {admin[1]}",
+                               f"Администратор {admin[0]}:\nИмя: {admin[5]}\nОрга: {admin[4]}",
                                reply_markup=keyboard)
 
 
@@ -961,5 +1065,216 @@ async def process_callback_demote(callback_query: types.CallbackQuery):
                            f"Администратор с id {admin_id} теперь является обычным пользователем.")
 
 
+@dp.message_handler(lambda message: message.text == 'Регистрация диспетчеров', is_superadmin=True)
+async def register_dispather(message: types.Message):
+    user_id = message.from_user.id
+
+    cursor.execute('SELECT * FROM users WHERE id=?', (user_id,))
+    user = cursor.fetchone()
+
+    if user:
+        admins = ['admin', 'disp_mau', 'superadmin']
+        for admin in admins:
+            cursor.execute('SELECT * FROM users WHERE role !=?', (admin,))
+            users = cursor.fetchall()
+
+        for user in users:
+            keyboard = InlineKeyboardMarkup()
+            keyboard.add(InlineKeyboardButton("Сделать диспетчером МАУ", callback_data=f"disp_{user[0]}"))
+            await bot.send_message(message.from_user.id,
+                                   f"Пользователь {user[0]}:\nИмя: {user[5]}\nОрга: {user[4]}\nРоль: {user[2]}",
+                                   reply_markup=keyboard)
+    else:
+        await message.answer("Вы не являетесь администратором!")
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('disp_'), state='*')
+async def process_callback_dispather(callback_query: types.CallbackQuery):
+    user_id = callback_query.data.split('_')[1]
+
+    cursor.execute('UPDATE users SET role = ? WHERE id = ?', ('disp_mau', user_id))
+    conn.commit()
+
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id, f"Пользователь с id {user_id} теперь является диспетчером.")
+
+
+@dp.message_handler(lambda message: message.text == 'Разжалование диспетчеров', is_superadmin=True)
+async def demote_dispather(message: types.Message):
+    cursor.execute('SELECT * FROM users WHERE role = ?', ('disp_mau',))
+    admins = cursor.fetchall()
+
+    for admin in admins:
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(InlineKeyboardButton("Разжаловать до пользователя", callback_data=f"demotedisp_{admin[0]}"))
+        await bot.send_message(message.from_user.id,
+                               f"Диспетчер {admin[0]}:\nИмя: {admin[5]}\nОрга: {admin[4]}",
+                               reply_markup=keyboard)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('demotedisp_'), state='*')
+async def process_callback_demote_dispather(callback_query: types.CallbackQuery):
+    admin_id = callback_query.data.split('_')[1]
+
+    cursor.execute('UPDATE users SET role = ? WHERE id = ?', ('user', admin_id))
+    conn.commit()
+
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id,
+                           f"Диспетчер с id {admin_id} теперь является обычным пользователем.")
+
+
+@dp.message_handler(lambda message: message.text == 'Создать заявку за пользователя', is_disp_mau=True)
+async def request(message: types.Message):
+    user_id = message.from_user.id
+
+    cursor.execute('SELECT * FROM users WHERE id=?', (user_id,))
+    user = cursor.fetchone()
+
+    if user:
+        await message.answer("Пожалуйста, выберите организацию.", reply_markup=inline_kb_full)
+        await RequestMauForm.organization.set()
+    else:
+        await message.answer("Извините, но у вас нет прав для создания заявки.", reply_markup=keyboard)
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('org:'), state=RequestMauForm.organization)
+async def process_callback_org(callback_query: types.CallbackQuery, state: FSMContext):
+    org = callback_query.data.split(':')[1]
+    async with state.proxy() as data:
+        data['organization'] = org
+        data['city'] = org_addresses[org]
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id, f'Вы выбрали организацию {org}')
+    await bot.edit_message_reply_markup(callback_query.from_user.id, callback_query.message.message_id)
+    await bot.send_message(callback_query.from_user.id, "Пожалуйста, введите тему обращения.")
+
+    await RequestMauForm.subject.set()
+
+
+@dp.message_handler(state=RequestMauForm.subject)
+async def process_subject(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['subject'] = message.text
+    await message.answer("Пожалуйста, введите текст обращения.")
+    await RequestMauForm.text.set()
+
+
+@dp.message_handler(state=RequestMauForm.text)
+async def process_text(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['text'] = message.text
+    await message.answer("Пожалуйста, введите номер телефона пользователя в виде 7999999999.")
+    await RequestMauForm.phonenum.set()
+
+
+@dp.message_handler(state=RequestMauForm.phonenum)
+async def process_phonenum(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['phonenum'] = message.text
+    await message.answer("Ваша заявка готова к отправке. Вы хотите отправить ее сейчас?",
+                         reply_markup=InlineKeyboardMarkup(
+                             inline_keyboard=[
+                                 [InlineKeyboardButton(text="Да", callback_data="yes"),
+                                  InlineKeyboardButton(text="Нет", callback_data="no")]
+                             ]
+                         ))
+    await RequestMauForm.confirm.set()
+
+
+@dp.callback_query_handler(lambda c: c.data in ['yes', 'no'], state=RequestMauForm.confirm)
+async def process_confirm(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == 'yes':
+        user_id = callback_query.from_user.id
+        async with state.proxy() as data:
+            subject = data['subject']
+            text = data['text']
+            phonenum = tel_format(data['phonenum'], mask)
+            organization = data['organization']
+            print(organization)
+
+        cursor.execute(
+            'INSERT INTO requests (user_id, subject, text, status, organization, phonenum) VALUES (?, ?, ?, ?, ?, ?)',
+            (user_id, subject, text, 'Зарегистрирована', organization, phonenum))  # add organization to the database
+        conn.commit()
+        cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+        user = cursor.fetchone()
+        cursor.execute('SELECT * FROM requests WHERE subject = ?', (subject,))
+        requests = cursor.fetchone()
+        print(requests)
+
+        chat_id = CHAT_ID
+        sent_message = await bot.send_message(chat_id,
+                                              f"Новая заявка от Диспетчера МАУ {user[5]}:\n"
+                                              f"Номер заявки: {requests[0]}\n"
+                                              f"Подразделение: {requests[6]}\nАдрес: {user[3]}\n"
+                                              f"Тема: {subject}\nТекст: {text}\n"
+                                              f"Статус: {requests[5]} 📝\nДата и время заявки: {requests[9]}")
+        cursor.execute('UPDATE requests SET message_id = ? WHERE id = ?',
+                       (sent_message.message_id, requests[0]))
+        conn.commit()
+        print(sent_message.message_id)
+        await bot.answer_callback_query(callback_query.id)
+        await bot.send_message(callback_query.from_user.id,
+                               f"Ваша заявка №{requests[0]} \' {subject}\' успешно создана и зарегистрирована",
+                               reply_markup=dispmau_keyboard)
+    else:
+        await bot.send_message(callback_query.from_user.id, "Ваша заявка не была отправлена.", reply_markup=keyboard)
+
+    await bot.delete_message(callback_query.from_user.id, callback_query.message.message_id)
+
+    await state.finish()
+
+
+@dp.message_handler(lambda message: message.text == 'Проверить статус заявок', is_disp_mau=True)
+async def check_status(message: types.Message):
+    user_id = message.from_user.id
+
+    await bot.send_message(
+        user_id,
+        "Выберите категорию заявки:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Зарегистрированные", callback_data="check_status_disp:registered")],
+                [InlineKeyboardButton(text="Принятые в работу и обжалованные",
+                                      callback_data="check_status_disp:in_progress")],
+                [InlineKeyboardButton(text="Выполненные", callback_data="check_status_disp:completed")]
+            ]
+        )
+    )
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('check_status_disp:'), state='*')
+async def process_check_status(callback_query: types.CallbackQuery, state: FSMContext):
+    user_id = callback_query.from_user.id
+    status = callback_query.data.split(':')[1]
+
+    if status == 'registered':
+        cursor.execute('SELECT * FROM requests WHERE user_id = ? and status = ?', (user_id, "Зарегистрирована"))
+    elif status == 'in_progress':
+        cursor.execute('SELECT * FROM requests WHERE user_id = ? and status in (?, ?)',
+                       (user_id, "Принята в работу", "Обжалована"))
+    elif status == 'completed':
+        cursor.execute('SELECT * FROM requests WHERE user_id = ? and status = ?', (user_id, "Выполнена"))
+
+    requests = cursor.fetchall()
+
+    if not requests:
+        await bot.send_message(user_id, "У вас нет заявок в этой категории.")
+    else:
+        for request in requests:
+            cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+            user = cursor.fetchone()
+
+            await bot.send_message(
+                user_id,
+                f"Заявка {request[0]}:\nПодразделение: {user[4]}\nАдрес: {user[3]}\nФИО: {user[5]}\n"
+                f"Тема: {request[2]}\n"
+                f"Текст: {request[3]}\nСтатус: {request[5]}\nНомер телефона: {request[13]}"
+            )
+    await bot.edit_message_reply_markup(callback_query.from_user.id, callback_query.message.message_id)
+    await bot.answer_callback_query(callback_query.id)
+
+
 if __name__ == '__main__':
-    executor.start_polling(dp)
+    executor.start_polling(dp, skip_updates=True)
